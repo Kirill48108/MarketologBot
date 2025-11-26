@@ -1,12 +1,8 @@
 import asyncio
 import time
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional
 
-if TYPE_CHECKING:
-    from redis.asyncio import Redis as AsyncRedis
-else:
-    # Обычный импорт для рантайма
-    from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio import Redis as AsyncRedis
 
 
 class AsyncTTLCache:

@@ -4,7 +4,7 @@ import os
 import random
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional, Set, Any
+from typing import Any, Dict, Optional, Set
 
 import socks
 from sqlalchemy.orm import Session, sessionmaker
