@@ -1,0 +1,244 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mb_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d mb_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # healthcheck опущен, чтобы не блокировать старт
+
+  bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+
+# Бот 1 — отдельный аккаунт, env в .env.bot1
+  bot1:
+    build: .
+    env_file:
+      - .env.bot1
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8001:8000"    # внешний порт 8001 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 2 — третий аккаунт, env в .env.bot2
+  bot2:
+    build: .
+    env_file:
+      - .env.bot2
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8002:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 3, env в .env.bot3
+  bot3:
+    build: .
+    env_file:
+      - .env.bot3
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8003:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 4 , env в .env.bot4
+  bot4:
+    build: .
+    env_file:
+      - .env.bot4
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8004:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 5, env в .env.bot5
+  bot5:
+    build: .
+    env_file:
+      - .env.bot5
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8005:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 6 , env в .env.bot6
+  bot6:
+    build: .
+    env_file:
+      - .env.bot6
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8006:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+
+  # Бот  , env в .env.bot7
+  bot7:
+    build: .
+    env_file:
+      - .env.bot7
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8007:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+
+  # Бот 8 , env в .env.bot8
+  bot8:
+    build: .
+    env_file:
+      - .env.bot8
+    environment:
+      LANG: "C.UTF-8"
+      LC_ALL: "C.UTF-8"
+      STYLE_PROMPT: "Пиши как обычный человек в комментариях Telegram: неформально, естественно, можно немного оффтопа, шутки и эмодзи. Отвечай только на русском, без ссылок.Избегай политических тем"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "8008:8000"    # внешний порт 8002 -> внутренний 8000
+    volumes:
+      - ./:/app
+volumes:
+  pgdata:
+  ollama:

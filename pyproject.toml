@@ -1,0 +1,85 @@
+[tool.poetry]
+name = "auto-chat-bot"
+version = "0.2.0"
+description = "Userbot that posts random generated messages to specified Telegram chats/channels"
+authors = ["you <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+telethon = "^1.36.0"
+pydantic = "^2.9.0"
+pydantic-settings = "^2.6.0"
+httpx = "^0.27.2"
+sqlalchemy = "^2.0.36"
+
+aiosqlite = "^0.20.0"
+python-dotenv = "^1.0.1"
+orjson = "^3.10.7"
+tenacity = "^9.0.0"
+openai = "^1.57.4"
+prometheus-client = "^0.20.0"
+redis = "^5.0.8"
+psycopg2-binary = "^2.9.11"
+pysocks = "^1.7.1"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+mypy = "^1.12.0"
+ruff = "^0.7.0"
+black = "^24.10.0"
+coverage = "^7.6.4"
+pytest-cov = "^7.0.0"
+
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "UP", "B", "S"]
+ignore = [
+  "S105",  # hardcoded passwords (здесь осознанно)
+  "S106",  # hardcoded passwords в тестах/конфигах
+  "S101",  # assert в тестах
+  "S110",  # try/except/pass/continue - допустимо в сервисных местах
+  "S112",  # try/except/continue без логирования - уже есть лог в большинстве мест
+  "S311",  # random.* для некриптографических задач (нам подходит)
+  "B009",  # getattr с константным атрибутом (используем осознанно)
+  "B904",  # raise HTTPException(...) без 'from' (не критично)
+  "E501",  # длинные строки (описания/regex допускаются)
+  "UP034", # лишние скобки - чисто косметика
+]
+
+
+[tool.black]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "session_gen"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "main"
+ignore_errors = true
+
+
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=app --cov=main --cov-report=term-missing --cov-fail-under=35"
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

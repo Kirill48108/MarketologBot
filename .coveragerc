@@ -1,0 +1,11 @@
+[run]
+branch = True
+source =
+    app
+    main
+
+[report]
+# можно исключить из покрытия чисто интеграционные вещи
+omit =
+    app/bot/userbot.py
+    app/storage/repository.py  # если не хочешь сейчас тестить БД
