@@ -68,4 +68,3 @@ def get_settings() -> Settings:
     # Settings читает значения из .env, mypy не видит окружение и считает,
     # что надо передавать все поля явно.
     return Settings()  # type: ignore[call-arg]
-

@@ -26,6 +26,7 @@ class MessageLog(Base):
     created_at: Mapped["DateTime"] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    bot_name: Mapped[str] = mapped_column(String, index=True, default="bot0")
 
 
 class LinkStat(Base):
@@ -50,14 +51,18 @@ def init_db(dsn: str) -> sessionmaker[Session]:
 # --- sync-функции + async-обёртки ---
 
 
-def _add_message_log_sync(db: sessionmaker[Session], chat_id: str, text: str) -> None:
+def _add_message_log_sync(
+    db: sessionmaker[Session], chat_id: str, text: str, bot_name: str
+) -> None:
     with db() as session:
-        session.add(MessageLog(chat_id=chat_id, message_text=text))
+        session.add(MessageLog(chat_id=chat_id, message_text=text, bot_name=bot_name))
         session.commit()
 
 
-async def add_message_log(db: sessionmaker[Session], chat_id: str, text: str) -> None:
-    await asyncio.to_thread(_add_message_log_sync, db, chat_id, text)
+async def add_message_log(
+    db: sessionmaker[Session], chat_id: str, text: str, bot_name: str
+) -> None:
+    await asyncio.to_thread(_add_message_log_sync, db, chat_id, text, bot_name)
 
 
 def _get_link_sync(db: sessionmaker[Session], slug: str) -> Optional[LinkStat]:

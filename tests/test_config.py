@@ -8,6 +8,6 @@ def test_settings_parsing(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     # Pydantic v2 ожидает JSON-формат для списка
     monkeypatch.setenv("ALLOWLIST_CHAT_IDS", "[123,-10045]")
-    s = Settings() # type: ignore[call-arg]
+    s = Settings()  # type: ignore[call-arg]
     assert s.telegram_api_id == 1
     assert s.allowlist_chat_ids == [123, -10045]

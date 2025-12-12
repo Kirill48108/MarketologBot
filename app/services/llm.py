@@ -380,5 +380,3 @@ class LLMClient:
         t = re.sub(r"http\S+", " ", t)
         words = [w for w in re.findall(r"[a-zа-я0-9\-]+", t, flags=re.IGNORECASE) if len(w) > 2]
         return " ".join(words[:8]) if words else ""
-
-

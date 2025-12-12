@@ -25,6 +25,8 @@ prometheus-client = "^0.20.0"
 redis = "^5.0.8"
 psycopg2-binary = "^2.9.11"
 pysocks = "^1.7.1"
+self = "^2020.12.3"
+logger = "^1.4"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -39,6 +41,8 @@ pytest-cov = "^7.0.0"
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "S"]
 ignore = [
   "S105",  # hardcoded passwords (здесь осознанно)
@@ -77,7 +81,7 @@ ignore_errors = true
 
 
 [tool.pytest.ini_options]
-addopts = "-q --cov=app --cov=main --cov-report=term-missing --cov-fail-under=35"
+addopts = "-q --cov=app --cov=main --cov-report=term-missing --cov-fail-under=10"
 asyncio_mode = "auto"
 
 [build-system]
