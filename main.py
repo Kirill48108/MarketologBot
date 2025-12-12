@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -10,9 +11,15 @@ from telethon.errors import RPCError
 
 from app.bot.userbot import UserBot
 from app.config import get_settings
+from app.services.admin_api import router as admin_router
 from app.services.cache import AsyncRedis, AsyncTTLCache, RedisTTLCache
 from app.services.llm import LLMClient
 from app.storage.repository import increment_click, init_db, upsert_link
+from app.storage.stats_repository import (  # <-- добавь эту строку
+    get_channel_stats,
+    get_links_stats,
+    get_stats_overview,
+)
 
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
@@ -22,9 +29,17 @@ _db_session = None
 _settings = None
 _cache = None
 
+# Подключаем админский роутер (дашбордный бекенд)
+app.include_router(admin_router, prefix="/admin", tags=["admin"])
+
 
 def admin_auth(token: Optional[str] = None):
-    if not token or token != _settings.admin_token:
+    """
+    Простая проверка админ-токена для эндпоинтов в main.py.
+    Используем тот же источник, что и admin_api.check_auth: переменную окружения ADMIN_TOKEN.
+    """
+    expected = os.getenv("ADMIN_TOKEN", "change-me")
+    if not expected or token != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -112,6 +127,102 @@ async def admin_recent_messages(
         raise HTTPException(500, f"failed to fetch recent messages: {e}")
 
 
+@app.get("/admin/stats/overview")
+async def admin_stats_overview(
+    x_admin_token: str = Header(default=None, alias="x-admin-token"),
+):
+    admin_auth(x_admin_token)
+    if not _db_session:
+        raise HTTPException(500, "DB session factory not initialized")
+
+    bot_name = os.getenv("BOT_NAME", getattr(_settings, "bot_name", "bot0"))
+    overview = get_stats_overview(_db_session, bot_name)
+
+    # Берём каналы из allowlist текущего бота (это “истина”)
+    allowlist_ids = list(getattr(_settings, "allowlist_chat_ids", []) or [])
+    channels_total = len(allowlist_ids)
+
+    return {
+        "bot_name": bot_name,
+        "channels_total": channels_total,
+        "channels_banned": overview.channels_banned,
+        "channels_flood_limited": overview.channels_flood_limited,
+        "messages_last_24h": overview.messages_last_24h,
+        "messages_last_7d": overview.messages_last_7d,
+        "links_total_clicks": overview.links_total_clicks,
+    }
+
+
+@app.get("/admin/stats/channels")
+async def admin_stats_channels(
+    x_admin_token: str = Header(default=None, alias="x-admin-token"),
+):
+    admin_auth(x_admin_token)
+    if not _db_session:
+        raise HTTPException(500, "DB session factory not initialized")
+
+    bot_name = os.getenv("BOT_NAME", getattr(_settings, "bot_name", "bot0"))
+
+    # статусы из БД:
+    items = get_channel_stats(_db_session, bot_name)
+    by_id = {int(r.chat_id): r for r in items}
+
+    # allowlist текущего бота:
+    allowlist_ids = list(getattr(_settings, "allowlist_chat_ids", []) or [])
+
+    # Отдаём статусы для ВСЕХ allowlist-чатов, даже если в channel_status ещё нет строки
+    merged = []
+    for cid in sorted(set(int(x) for x in allowlist_ids)):
+        row = by_id.get(cid)
+        if row is None:
+            merged.append(
+                {
+                    "chat_id": cid,
+                    "status": "ok",
+                    "error_count_recent": 0,
+                    "last_error_type": None,
+                    "last_error_at": None,
+                }
+            )
+        else:
+            merged.append(
+                {
+                    "chat_id": row.chat_id,
+                    "status": row.status,
+                    "error_count_recent": row.error_count_recent,
+                    "last_error_type": row.last_error_type,
+                    "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
+                }
+            )
+
+    return {"items": merged}
+
+
+@app.get("/admin/stats/links")
+async def admin_stats_links(
+    x_admin_token: str = Header(default=None, alias="x-admin-token"),
+):
+    """
+    Статистика по трекаемым ссылкам (/r/{slug}).
+    """
+    admin_auth(x_admin_token)
+    if not _db_session:
+        raise HTTPException(500, "DB session factory not initialized")
+
+    items = get_links_stats(_db_session)
+
+    return {
+        "items": [
+            {
+                "slug": row.slug,
+                "target_url": row.target_url,
+                "clicks": row.clicks,
+            }
+            for row in items
+        ]
+    }
+
+
 # Принудительная отправка (для диагностики): коммент для канала / сообщение в чат
 @app.post("/admin/send_test")
 async def admin_send_test(
@@ -169,7 +280,10 @@ async def admin_send_test(
         from app.storage.repository import add_message_log
 
         await add_message_log(
-            _db_session, chat_id=str(getattr(entity, "id", chat_id or raw_peer)), text=text
+            _db_session,
+            chat_id=str(getattr(entity, "id", chat_id or raw_peer)),
+            text=text,
+            bot_name=getattr(_userbot, "bot_name", "bot0"),
         )
 
         return {"ok": True, "peer": raw_peer, "chat_id": chat_id, "where": where}
@@ -215,6 +329,11 @@ async def admin_inspect_chat(
 async def admin_overview(request: Request):
     token = request.headers.get("x-admin-token")
     admin_auth(token)
+
+    # Отключаем HTML-страницы по умолчанию (на VPS не надо).
+    if os.getenv("EXPOSE_BOT_DASHBOARD", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
+
     html = """
     <html><head><title>Admin Overview</title></head>
     <body>
@@ -224,6 +343,24 @@ async def admin_overview(request: Request):
       </ul>
       <p>POST /admin/links/{slug} с JSON {"target_url": "..."} и заголовком x-admin-token.</p>
     </body></html>
+    """
+    return HTMLResponse(html)
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard():
+    """
+    Локальный HTML-дашборд бота.
+    На VPS лучше выключать и пользоваться единым control-center.
+    """
+    if os.getenv("EXPOSE_BOT_DASHBOARD", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    html = """
+    <!DOCTYPE html>
+    <html lang="ru">
+    <!-- ... existing code ... -->
+    </html>
     """
     return HTMLResponse(html)
 
@@ -291,3 +428,83 @@ async def on_shutdown():
         await _userbot.stop()
     if _bot_task and not _bot_task.done():
         _bot_task.cancel()
+
+
+def get_userbot() -> Optional[UserBot]:
+    """
+    Простая утилита для доступа к текущему UserBot из других модулей (admin_api).
+    """
+    global _userbot
+    return _userbot
+
+
+@app.post("/admin/control/enable")
+async def admin_enable_bot(x_admin_token: str = Header(default=None, alias="x-admin-token")):
+    admin_auth(x_admin_token)
+    if _userbot:
+        _userbot.enable()
+    # Заодно обновим BOT_ENABLED в .env через admin_api, если хочешь, можно позже
+    return {"enabled": True}
+
+
+@app.post("/admin/control/disable")
+async def admin_disable_bot(x_admin_token: str = Header(default=None, alias="x-admin-token")):
+    admin_auth(x_admin_token)
+    if _userbot:
+        _userbot.disable()
+    return {"enabled": False}
+
+
+@app.post("/admin/control/restart_bot")
+async def admin_restart_bot(x_admin_token: str = Header(default=None, alias="x-admin-token")):
+    admin_auth(x_admin_token)
+    global _bot_task, _userbot, _settings, _db_session, _cache
+
+    # Остановим старый бот, если он есть
+    if _userbot:
+        try:
+            await _userbot.stop()
+        except Exception as e:
+            logger.warning("Failed to stop existing UserBot on restart: %s", e)
+    if _bot_task and not _bot_task.done():
+        _bot_task.cancel()
+
+    # Пересчитываем allowlist из текущего _settings и окружения
+    # (на случай, если .env поменяли через admin_api)
+    from app.config import get_settings as _reload_settings
+
+    _settings = _reload_settings()
+    allowlist = set(_settings.allowlist_chat_ids or [])
+
+    # Создаём нового UserBot
+    llm = LLMClient(
+        api_key=_settings.openai_api_key,
+        model=_settings.llm_model,
+        base_url=_settings.openai_base_url,
+        style_prompt=_settings.style_prompt,
+        extra_topics=_settings.default_topics,
+    )
+
+    _userbot = UserBot(
+        api_id=_settings.telegram_api_id,
+        api_hash=_settings.telegram_api_hash,
+        session_string=_settings.telegram_session_string,
+        llm=llm,
+        allowlist=allowlist,
+        messages_per_hour=_settings.messages_per_hour,
+        min_interval_global=_settings.min_interval_between_messages_seconds,
+        min_interval_per_chat=_settings.min_interval_per_chat_seconds,
+        cache=_cache,
+        db=_db_session,
+        fresh_post_max_age_minutes=_settings.fresh_post_max_age_minutes,
+    )
+
+    if _settings.bot_enabled:
+        _bot_task = asyncio.create_task(_userbot.start())
+        logger.info("UserBot restarted via /admin/control/restart_bot")
+
+    return {
+        "ok": True,
+        "enabled": _settings.bot_enabled,
+        "allowlist_chat_ids": list(allowlist),
+    }

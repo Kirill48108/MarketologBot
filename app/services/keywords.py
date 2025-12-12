@@ -21,7 +21,6 @@ PATTERNS: Dict[str, Pattern[str]] = {
 }
 
 
-
 def normalize(text: str) -> str:
     return text.replace("ё", "е").strip()
 
@@ -44,5 +43,6 @@ def score(text: str) -> Tuple[int, Dict[str, bool]]:
             else:
                 s += 1
     return s, hits
+
 
 THRESHOLD = 3  # минимальный балл чтобы реагировать

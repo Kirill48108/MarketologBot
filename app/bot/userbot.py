@@ -17,6 +17,7 @@ from telethon.errors import (
 )
 from telethon.sessions import StringSession
 
+from app.bot.autojoin import run_autojoin
 from app.metrics import (
     cache_hits,
     cache_misses,
@@ -29,6 +30,7 @@ from app.metrics import (
 from app.services.cache import AsyncTTLCache
 from app.services.llm import LLMClient
 from app.storage.repository import add_message_log
+from app.storage.stats_repository import register_channel_error, reset_channel_error_counter
 
 logger = logging.getLogger("app.bot.userbot")
 
@@ -115,6 +117,11 @@ class UserBot:
 
         self._self_id: Optional[int] = None
 
+        # Флаг: включать ли запись статусов каналов в БД (channel_status)
+        self._channel_status_tracking_enabled: bool = (
+            os.getenv("CHANNEL_STATUS_TRACKING_ENABLED", "true").lower() == "true"
+        )
+
         # Задержка для мгновенного комментария (секунды), по умолчанию 0
         try:
             self.instant_delay_seconds = int(
@@ -155,14 +162,39 @@ class UserBot:
         self._spam_block_until_ts: float = 0.0  # time.monotonic(), до какого момента не шлём вообще
         self._spam_errors_recent: int = 0  # подряд серьёзных ошибок отправки
 
-    def enable(self)-> None:
+        # Имя бота для статистики (для пула можно задать BOT_NAME в .env)
+        self.bot_name: str = os.getenv("BOT_NAME", "bot0")
+
+    def enable(self) -> None:
         self._enabled = True
 
-    def disable(self)-> None:
+    def disable(self) -> None:
         self._enabled = False
 
     def is_enabled(self) -> bool:
         return self._enabled
+
+    # -------------------------------------------------------------------------
+    # Вспомогательные методы allowlist / выбор комментария
+    # -------------------------------------------------------------------------
+
+    def _in_allowlist(self, chat_id: int) -> bool:
+        """
+        Проверка, находится ли канал в allowlist.
+        Если allowlist пустой — считаем, что разрешено везде.
+        """
+        if not self.allowlist:
+            return True
+        return chat_id in self.allowlist
+
+    async def _choose_user_comment(self, entity: Any, post_id: int) -> Optional[Any]:
+        """
+        Выбор комментария пользователя под постом, на который будем отвечать.
+        Простая базовая реализация: ничего не выбираем, возвращаем None
+        → бот будет оставлять комментарий к самому посту.
+        При желании здесь можно реализовать более умную стратегию.
+        """
+        return None
 
     # -------------------------------------------------------------------------
     # Вспомогательные методы лимитов/окон
@@ -269,7 +301,6 @@ class UserBot:
     # -------------------------------------------------------------------------
     # Анти‑спамблок
     # -------------------------------------------------------------------------
-
     def _is_spamblocked(self) -> bool:
         """
         Проверка, находится ли аккаунт в режиме глобального спамблока.
@@ -286,13 +317,31 @@ class UserBot:
     def _handle_send_error(self, chat_id: int, exc: Exception) -> None:
         """
         Обработка ошибок отправки сообщений:
-        - локальные баны/запреты → добавляем чат в _banned_chats;
-        - PeerFlood/FloodWait → возможный глобальный спамблок.
+        - локальные баны/запреты → добавляем чат в _banned_chats и пишем в channel_status;
+        - PeerFlood/FloodWait → возможный глобальный спамблок + отметка канала.
         """
         # Локальные запреты писать в чат
         if isinstance(exc, (ChatWriteForbiddenError, UserBannedInChannelError)):
             logger.warning("Write forbidden/banned in chat %s: %s", chat_id, exc)
             self._banned_chats.add(chat_id)
+
+            # Зарегистрируем локальный бан в channel_status (если включено)
+            if self._channel_status_tracking_enabled:
+                try:
+                    register_channel_error(
+                        session_factory=self.db,
+                        bot_name=self.bot_name,
+                        chat_id=int(chat_id),
+                        error_type=exc.__class__.__name__,
+                        threshold=self._spamblock_error_threshold,
+                    )
+                except Exception as repo_exc:
+                    logger.warning(
+                        "Failed to register channel error in DB for chat %s: %s",
+                        chat_id,
+                        repo_exc,
+                    )
+
             return
 
         # Подозрение на спамблок
@@ -312,6 +361,23 @@ class UserBot:
                 self._spam_errors_recent,
             )
 
+            # Запишем ошибку и для канала (если включено)
+            if self._channel_status_tracking_enabled:
+                try:
+                    register_channel_error(
+                        session_factory=self.db,
+                        bot_name=self.bot_name,
+                        chat_id=int(chat_id),
+                        error_type=exc.__class__.__name__,
+                        threshold=self._spamblock_error_threshold,
+                    )
+                except Exception as repo_exc:
+                    logger.warning(
+                        "Failed to register spam/flood channel error for chat %s: %s",
+                        chat_id,
+                        repo_exc,
+                    )
+
             if self._spam_errors_recent >= self._spamblock_error_threshold:
                 # Выставляем глобальный спамблок
                 base = self._spamblock_min_cooldown
@@ -329,11 +395,36 @@ class UserBot:
         # Любые другие ошибки сюда не считаем как спамблок
         return
 
-    # -------------------------------------------------------------------------
-    # Старт/стоп
-    # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
+        # Старт/стоп
+        # -------------------------------------------------------------------------
 
-    async def start(self)-> None:
+    async def _pick_chat(self) -> Optional[int]:
+        """
+        Выбор следующего чата для планировщика.
+        Берём из allowlist, исключая локально забаненные чаты.
+        Стараемся не выбирать два раза подряд один и тот же чат.
+        """
+        if not self.allowlist:
+            return None
+
+        # Исключаем чаты, где уже словили локальный бан
+        candidates = [cid for cid in self.allowlist if cid not in self._banned_chats]
+        if not candidates:
+            return None
+
+        # Если есть выбор, избегаем последнего использованного чата
+        if self._last_chat_id in candidates and len(candidates) > 1:
+            candidates_no_last = [cid for cid in candidates if cid != self._last_chat_id]
+        else:
+            candidates_no_last = candidates
+
+        return random.choice(candidates_no_last)
+
+    async def start(self) -> None:
+        """
+        Запуск Telegram-клиента, автоджойн и старт планировщика.
+        """
         await self.client.start()
         logger.info("Telegram client started")
 
@@ -342,6 +433,42 @@ class UserBot:
             self._self_id = getattr(me, "id", None)
         except Exception:
             self._self_id = None
+
+        # ------------------------------
+        # Автоджойн перед основной работой
+        # ------------------------------
+        try:
+            autojoin_raw = (os.getenv("AUTOJOIN_CHAT_IDS") or "").strip()
+            autojoin_refs = []
+
+            if autojoin_raw:
+                # Формат: [123, "@chan", "https://t.me/chan"]
+                import ast
+
+                try:
+                    parsed = ast.literal_eval(autojoin_raw)
+                    if isinstance(parsed, (list, tuple, set)):
+                        autojoin_refs = list(parsed)
+                except Exception as e:
+                    logger.warning(
+                        "AUTOJOIN: failed to parse AUTOJOIN_CHAT_IDS='%s': %s",
+                        autojoin_raw,
+                        e,
+                    )
+
+            delay = int(os.getenv("AUTOJOIN_DELAY_SECONDS", "300") or "300")
+
+            if autojoin_refs:
+                logger.info(
+                    "AUTOJOIN: will auto-join %s channels before starting normal work",
+                    len(autojoin_refs),
+                )
+                await run_autojoin(self.client, autojoin_refs, delay_seconds=delay)
+            else:
+                logger.info("AUTOJOIN: no AUTOJOIN_CHAT_IDS configured, skipping auto-join")
+
+        except Exception as e:
+            logger.warning("AUTOJOIN: unexpected error during autojoin phase: %s", e)
 
         # Прогрев каналов (ускоряет появление апдейтов)
         try:
@@ -365,12 +492,18 @@ class UserBot:
         self._runner_task = asyncio.create_task(self._scheduler_loop())
         await self.client.run_until_disconnected()
 
-    async def stop(self)-> None:
+    async def stop(self) -> None:
+        """
+        Остановить планировщик и отключиться от Telegram.
+        """
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
         await self.client.disconnect()
 
-    async def _scheduler_loop(self)-> None:
+    async def _scheduler_loop(self) -> None:
+        """
+        Основной цикл планировщика: периодически вызывает _tick_send.
+        """
         interval_base = max(2, int(3600 / max(1, self.messages_per_hour)))
         while True:
             try:
@@ -414,44 +547,6 @@ class UserBot:
                 await asyncio.sleep(5)
 
     # -------------------------------------------------------------------------
-    # Служебные методы выбора чата/комментария
-    # -------------------------------------------------------------------------
-
-    async def _pick_chat(self) -> Optional[int]:
-        """
-        Выбор следующего чата из allowlist с учётом последнего использованного
-        и blacklist'а забаненных чатов.
-        """
-        if not self.allowlist:
-            return None
-        candidates = [cid for cid in self.allowlist if cid not in self._banned_chats]
-        if not candidates:
-            return None
-        if self._last_chat_id in candidates and len(candidates) > 1:
-            candidates.remove(self._last_chat_id)
-        return random.choice(candidates)
-
-    async def _choose_user_comment(self, entity: Any, post_id: int) -> Optional[Any]:
-        try:
-            comments = await self.client.get_messages(entity, reply_to=post_id, limit=30)
-            for c in comments:
-                uid = getattr(getattr(c, "from_id", None), "user_id", None)
-                if uid and uid != self._self_id and (c.message or "").strip():
-                    return c
-        except Exception:
-            return None
-        return None
-
-    def _in_allowlist(self, channel_int_id: int) -> bool:
-        if channel_int_id in self.allowlist:
-            return True
-        try:
-            neg_form = int(f"-100{channel_int_id}")
-            return neg_form in self.allowlist
-        except Exception:
-            return False
-
-    # -------------------------------------------------------------------------
     # Instant-логика
     # -------------------------------------------------------------------------
 
@@ -469,6 +564,14 @@ class UserBot:
                 return
 
             real_id = int(entity.id)
+
+            # Если чат уже помечен как локально забаненный — никогда туда не пишем
+            if real_id in self._banned_chats:
+                logger.info(
+                    "Instant skip: chat_id=%s is in local banned list, skip permanently",
+                    real_id,
+                )
+                return
 
             # Временные окна, суточный/оконный лимиты, глобальный спамблок
             if not self._is_within_active_window():
@@ -533,14 +636,14 @@ class UserBot:
             logger.warning("Instant comment failed: %s", e)
 
     async def _instant_with_delay(
-            self,
-            entity: Any,
-            real_id: int,
-            msg: Any,
-            post_text: str,
-            last_post_id: int,
-            target_comment: Any,
-            delay: float,
+        self,
+        entity: Any,
+        real_id: int,
+        msg: Any,
+        post_text: str,
+        last_post_id: int,
+        target_comment: Any,
+        delay: float,
     ) -> None:
         try:
             await asyncio.sleep(delay)
@@ -616,6 +719,7 @@ class UserBot:
                         target_comment.id,
                         (text or "")[:120],
                     )
+                    real_chat_id = int(getattr(discussion, "id", real_id))
                 else:
                     await self.client.send_message(entity, text, comment_to=last_post_id)
                     logger.info(
@@ -624,6 +728,23 @@ class UserBot:
                         last_post_id,
                         (text or "")[:120],
                     )
+                    real_chat_id = int(real_id)
+
+                # Успешная отправка → сбрасываем счётчик ошибок по каналу (если включено)
+                if self._channel_status_tracking_enabled:
+                    try:
+                        reset_channel_error_counter(
+                            session_factory=self.db,
+                            bot_name=self.bot_name,
+                            chat_id=real_chat_id,
+                        )
+                    except Exception as repo_exc:
+                        logger.warning(
+                            "Failed to reset channel error counter after instant send chat_id=%s: %s",
+                            real_chat_id,
+                            repo_exc,
+                        )
+
             except Exception as send_exc:
                 self._handle_send_error(real_id, send_exc)
                 send_failures.inc()
@@ -642,16 +763,16 @@ class UserBot:
             self._inc_counters_for_now()
             self._register_instant_send(real_id)
 
-            await add_message_log(self.db, chat_id=str(real_id), text=text)
+            await add_message_log(self.db, chat_id=str(real_id), text=text, bot_name=self.bot_name)
         except Exception as e:
             send_failures.inc()
             logger.warning("Instant comment failed: %s", e)
 
-    # -------------------------------------------------------------------------
-    # Планировщик
-    # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
+        # Планировщик
+        # -------------------------------------------------------------------------
 
-    async def _tick_send(self, interval_base: int)-> None:
+    async def _tick_send(self, interval_base: int) -> None:
         now = time.monotonic()
 
         if not self._can_send_more_today():
@@ -806,6 +927,22 @@ class UserBot:
                     else:
                         await self.client.send_message(entity, text)
                         logger.info("Message sent to chat_id=%s: %s", chat_id, (text or "")[:120])
+
+                # Успешная отправка → сбрасываем ошибки канала (если включено)
+                if self._channel_status_tracking_enabled:
+                    try:
+                        reset_channel_error_counter(
+                            session_factory=self.db,
+                            bot_name=self.bot_name,
+                            chat_id=int(chat_id),
+                        )
+                    except Exception as repo_exc:
+                        logger.warning(
+                            "Failed to reset channel error counter after scheduled send chat_id=%s: %s",
+                            chat_id,
+                            repo_exc,
+                        )
+
             except Exception as send_exc:
                 self._handle_send_error(chat_id, send_exc)
                 send_failures.inc()
@@ -820,7 +957,7 @@ class UserBot:
             messages_sent.inc()
 
             self._inc_counters_for_now()
-            await add_message_log(self.db, chat_id=str(chat_id), text=text)
+            await add_message_log(self.db, chat_id=str(chat_id), text=text, bot_name=self.bot_name)
 
         except Exception as e:
             send_failures.inc()
